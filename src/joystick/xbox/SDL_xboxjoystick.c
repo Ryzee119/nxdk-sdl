@@ -45,12 +45,12 @@
 #define JOY_DBGMSG(...)
 #endif
 
-#ifndef MAX_GAMECONTROLLERS
-#define MAX_GAMECONTROLLERS CONFIG_HID_MAX_DEV
-#endif
+#define MAX_JOYSTICKS CONFIG_HID_MAX_DEV
 
 #define BUTTON_DEADZONE 0x20
 
+//XINPUT defines and struct format from
+//https://docs.microsoft.com/en-us/windows/win32/api/xinput/ns-xinput-xinput_gamepad
 #define XINPUT_GAMEPAD_DPAD_UP 0x0001
 #define XINPUT_GAMEPAD_DPAD_DOWN 0x0002
 #define XINPUT_GAMEPAD_DPAD_LEFT 0x0004
@@ -117,7 +117,8 @@ static void usbh_int_read_callback(HID_DEV_T *hdev, Uint16 ep_addr, Sint32 statu
     {
     case XBOXOG_CONTROLLER:
     case XBOX360_WIRED:
-        if (rdata[1] != 0x14) return;
+        //Check the packet length is atleast the expected amount.
+        if (rdata[1] < 0x14) return;
         break;
     case XBOX360_WIRELESS:
         if ((rdata[1] & 0x01) == 0 || rdata[5] != 0x13) return;
@@ -135,11 +136,10 @@ static void usbh_int_read_callback(HID_DEV_T *hdev, Uint16 ep_addr, Sint32 statu
     if (data_len > MAX_PACKET_SIZE)
         data_len = MAX_PACKET_SIZE;
 
-    memcpy(joy->hwdata->raw_data, rdata, data_len);
+    SDL_memcpy(joy->hwdata->raw_data, rdata, data_len);
 }
 
 static HID_DEV_T *usbh_get_hdev_from_device_index(Sint32 device_index) {
-    usbh_pooling_hubs();
     HID_DEV_T *hdev = usbh_hid_get_device_list();
 
     Sint32 i = 0;
@@ -169,13 +169,16 @@ static Sint32 SDL_XBOX_JoystickInit(void) {
     }
     usbh_install_hid_conn_callback(hdev_connection_callback, hdev_disconnect_callback);
 
+#ifndef SDL_DISABLE_JOYSTICK_INIT_DELAY
     //Ensure all connected devices have completed enumeration and are running
     //This wouldnt be required if user applications correctly handled connection events, but most dont
+    //This needs to allow time for port reset, debounce, device reset etc. ~200ms per device. ~500ms is time for 1 hub + 1 controller.
     for (Sint32 i = 0; i < 500; i++)
     {
         usbh_pooling_hubs();
         SDL_Delay(1);
     }
+#endif
     return 0;
 }
 
@@ -202,26 +205,32 @@ static void SDL_XBOX_JoystickDetect() {
 static const char* SDL_XBOX_JoystickGetDeviceName(Sint32 device_index) {
     HID_DEV_T *hdev = usbh_get_hdev_from_device_index(device_index);
 
-    if (hdev == NULL)
+    if (hdev == NULL || device_index >= MAX_JOYSTICKS)
         return "Invalid device index";
+
+    static char name[MAX_JOYSTICKS][32];
+    Uint32 max_len = sizeof(name[device_index]);
 
     switch (hdev->type)
     {
     case XBOXOG_CONTROLLER:
-        return "Original Xbox Controller";
+        SDL_snprintf(name[device_index], max_len, "Original Xbox Controller #%u", device_index + 1);
+        break;
     case XBOX360_WIRED:
     case XBOX360_WIRELESS:
-        return "Xbox 360 Controller";
+        SDL_snprintf(name[device_index], max_len, "Xbox 360 Controller #%u", device_index + 1);
+        break;
     case XBOXONE:
-        return "Xbox One Controller";
+        SDL_snprintf(name[device_index], max_len, "Xbox One Controller #%u", device_index + 1);
+        break;
     default:
-        return "Unknown Controller";
+        SDL_snprintf(name[device_index], max_len, "Unknown Controller #%u", device_index + 1);
     }
+    return name[device_index];
 }
 
 //FIXME
-//Player index is just a tick number that is recorded when the usb device is plugged in,
-//i.e the lower number is what controller was connected first.
+//Player index is just the order the controllers were plugged in.
 //This may not be what the user expects on a Xbox console.
 //Player index should consider that Port 1 = player 1, Port 2 = player 2 etc.
 static Sint32 SDL_XBOX_JoystickGetDevicePlayerIndex(Sint32 device_index) {
@@ -230,8 +239,8 @@ static Sint32 SDL_XBOX_JoystickGetDevicePlayerIndex(Sint32 device_index) {
     if (hdev == NULL)
         return -1;
 
-    JOY_DBGMSG("SDL_XBOX_JoystickGetDevicePlayerIndex: %i\n", hdev->uid);
-    return hdev->uid;
+    JOY_DBGMSG("SDL_XBOX_JoystickGetDevicePlayerIndex: %i\n", device_index);
+    return device_index;
 }
 
 static SDL_JoystickGUID SDL_XBOX_JoystickGetDeviceGUID(Sint32 device_index) {
@@ -267,9 +276,6 @@ static SDL_JoystickID SDL_XBOX_JoystickGetDeviceInstanceID(Sint32 device_index) 
 }
 
 static Sint32 SDL_XBOX_JoystickOpen(SDL_Joystick *joystick, Sint32 device_index) {
-
-    SDL_XBOX_JoystickDetect();
-
     HID_DEV_T *hdev = usbh_get_hdev_from_device_index(device_index);
 
     if (hdev == NULL)
@@ -399,7 +405,7 @@ static void SDL_XBOX_JoystickUpdate(SDL_Joystick *joystick) {
     }
 
     uint8_t button_data[MAX_PACKET_SIZE];
-    memcpy(button_data, joystick->hwdata->raw_data, MAX_PACKET_SIZE);
+    SDL_memcpy(button_data, joystick->hwdata->raw_data, MAX_PACKET_SIZE);
     if (xinput_parse_input(joystick->hwdata->hdev, &xpad, button_data))
     {
         wButtons = xpad.wButtons;
@@ -468,14 +474,16 @@ static void SDL_XBOX_JoystickClose(SDL_Joystick *joystick)
     if (joystick->hwdata == NULL)
         return;
 
+    SDL_XBOX_JoystickRumble(joystick, 0, 0, 0);
+
     HID_DEV_T *hdev = joystick->hwdata->hdev;
     hdev->user_data = NULL;
     if (hdev != NULL && hdev->read_func != NULL)
     {
         JOY_DBGMSG("Closing joystick:\n", joystick->hwdata->hdev->uid);
-        JOY_DBGMSG("joystick uid: %i\n", joystick->hwdata->hdev->uid);
         JOY_DBGMSG("joystick player_index: %i\n", joystick->player_index);
-        //The hdev is still registered in the usb driver but stops reading the interrupt pipe
+        //The hdev is still registered in the backend usb driver to allow it to be repoened easily
+        //but it stops reading the interrupt pipe to free up resources.
         usbh_hid_stop_int_read(hdev, 0);
     }
     SDL_free(joystick->hwdata);
@@ -485,6 +493,8 @@ static void SDL_XBOX_JoystickClose(SDL_Joystick *joystick)
 static void SDL_XBOX_JoystickQuit(void) {
     JOY_DBGMSG("SDL_XBOX_JoystickQuit\n");
     usbh_install_hid_conn_callback(NULL, NULL);
+    //We dont call usbh_core_deinit() here incase the user is using
+    //the USB stack in other parts of their application other than game controllers.
 }
 
 SDL_JoystickDriver SDL_XBOX_JoystickDriver = {
