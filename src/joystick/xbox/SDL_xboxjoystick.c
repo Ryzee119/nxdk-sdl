@@ -139,6 +139,58 @@ static void usbh_int_read_callback(HID_DEV_T *hdev, Uint16 ep_addr, Sint32 statu
     SDL_memcpy(joy->hwdata->raw_data, rdata, data_len);
 }
 
+static Sint32 usbh_joystick_rumble(HID_DEV_T *hdev,
+                                   Uint16 low_frequency_rumble,
+                                   Uint16 high_frequency_rumble) {
+
+    //Rumble commands for known controllers
+    static const Uint8 xbox360_wireless[] = {0x00, 0x01, 0x0F, 0xC0, 0x00, 0x00, 0x00, 0x00};
+    static const Uint8 xbox360_wired[] = {0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    static const Uint8 xbox_og[] = {0x00, 0x06, 0x00, 0x00, 0x00, 0x00};
+    static const Uint8 xbox_one[] = {0x09, 0x00, 0x00, 0x09, 0x00, 0x0f, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x00, 0xEB};
+
+    Uint8 writeBuf[MAX_PACKET_SIZE];
+    int ret;
+    switch (hdev->type)
+    {
+    case XBOX360_WIRELESS:
+        SDL_memcpy(writeBuf, xbox360_wireless, sizeof(xbox360_wireless));
+        writeBuf[5] = low_frequency_rumble >> 8;
+        writeBuf[6] = high_frequency_rumble >> 8;
+        ret = usbh_hid_int_write(hdev, 0, writeBuf, 8, usbh_int_write_callback);
+        break;
+    case XBOX360_WIRED:
+        SDL_memcpy(writeBuf, xbox360_wired, sizeof(xbox360_wired));
+        writeBuf[3] = low_frequency_rumble >> 8;
+        writeBuf[4] = high_frequency_rumble >> 8;
+        ret = usbh_hid_int_write(hdev, 0, writeBuf, 8, usbh_int_write_callback);
+        break;
+    case XBOXOG_CONTROLLER:
+        SDL_memcpy(writeBuf, xbox_og, sizeof(xbox_og));
+        writeBuf[2] = low_frequency_rumble & 0xFF;
+        writeBuf[3] = low_frequency_rumble >> 8;
+        writeBuf[4] = high_frequency_rumble & 0xFF;
+        writeBuf[5] = high_frequency_rumble >> 8;
+        ret = usbh_hid_int_write(hdev, 0, writeBuf, 6, usbh_int_write_callback);
+        break;
+    case XBOXONE:
+        SDL_memcpy(writeBuf, xbox_one, sizeof(xbox_one));
+        writeBuf[8] = low_frequency_rumble / 655; //Scale is 0 to 100
+        writeBuf[9] = high_frequency_rumble / 655; //Scale is 0 to 100
+        ret = usbh_hid_int_write(hdev, 0, writeBuf, 13, usbh_int_write_callback);
+        break;
+    default:
+        return -1;
+    }
+
+    if (ret != HID_RET_OK)
+    {
+        return -1;
+    }
+
+    return 0;
+}
+
 static HID_DEV_T *usbh_get_hdev_from_device_index(Sint32 device_index) {
     HID_DEV_T *hdev = usbh_hid_get_device_list();
 
@@ -239,7 +291,9 @@ static Sint32 SDL_XBOX_JoystickGetDevicePlayerIndex(Sint32 device_index) {
     if (hdev == NULL)
         return -1;
 
-    JOY_DBGMSG("SDL_XBOX_JoystickGetDevicePlayerIndex: %i\n", device_index);
+    Sint32 player_index = device_index;
+    JOY_DBGMSG("SDL_XBOX_JoystickGetDevicePlayerIndex: %i\n", player_index);
+
     return device_index;
 }
 
@@ -328,56 +382,18 @@ static Sint32 SDL_XBOX_JoystickRumble(SDL_Joystick *joystick,
                                    Uint16 high_frequency_rumble,
                                    Uint32 duration_ms) {
 
-    //Rumble commands for known controllers
-    static const Uint8 xbox360_wireless[] = {0x00, 0x01, 0x0F, 0xC0, 0x00, 0x00, 0x00, 0x00};
-    static const Uint8 xbox360_wired[] = {0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-    static const Uint8 xbox_og[] = {0x00, 0x06, 0x00, 0x00, 0x00, 0x00};
-    static const Uint8 xbox_one[] = {0x09, 0x00, 0x00, 0x09, 0x00, 0x0f, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x00, 0xEB};
-
     //Check if rumble values are new values.
     if (joystick->hwdata->current_rumble[0] == low_frequency_rumble &&
         joystick->hwdata->current_rumble[1] == high_frequency_rumble)
     {
         //Reset the expiry timer and leave
         joystick->hwdata->rumble_expiry = SDL_GetTicks() + duration_ms;
-        return HID_RET_OK;
+        return 0;
     }
 
-    Uint8 writeBuf[MAX_PACKET_SIZE];
-    int ret;
-    switch (joystick->hwdata->hdev->type)
-    {
-    case XBOX360_WIRELESS:
-        SDL_memcpy(writeBuf, xbox360_wireless, sizeof(xbox360_wireless));
-        writeBuf[5] = low_frequency_rumble >> 8;
-        writeBuf[6] = high_frequency_rumble >> 8;
-        ret = usbh_hid_int_write(joystick->hwdata->hdev, 0, writeBuf, 8, usbh_int_write_callback);
-        break;
-    case XBOX360_WIRED:
-        SDL_memcpy(writeBuf, xbox360_wired, sizeof(xbox360_wired));
-        writeBuf[3] = low_frequency_rumble >> 8;
-        writeBuf[4] = high_frequency_rumble >> 8;
-        ret = usbh_hid_int_write(joystick->hwdata->hdev, 0, writeBuf, 8, usbh_int_write_callback);
-        break;
-    case XBOXOG_CONTROLLER:
-        SDL_memcpy(writeBuf, xbox_og, sizeof(xbox_og));
-        writeBuf[2] = low_frequency_rumble & 0xFF;
-        writeBuf[3] = low_frequency_rumble >> 8;
-        writeBuf[4] = high_frequency_rumble & 0xFF;
-        writeBuf[5] = high_frequency_rumble >> 8;
-        ret = usbh_hid_int_write(joystick->hwdata->hdev, 0, writeBuf, 6, usbh_int_write_callback);
-        break;
-    case XBOXONE:
-        SDL_memcpy(writeBuf, xbox_one, sizeof(xbox_one));
-        writeBuf[8] = low_frequency_rumble / 655; //Scale is 0 to 100
-        writeBuf[9] = high_frequency_rumble / 655; //Scale is 0 to 100
-        ret = usbh_hid_int_write(joystick->hwdata->hdev, 0, writeBuf, 13, usbh_int_write_callback);
-        break;
-    default:
-        return -1;
-    }
+    Sint32 ret = usbh_joystick_rumble(joystick->hwdata->hdev, low_frequency_rumble, high_frequency_rumble);
 
-    if (ret != HID_RET_OK)
+    if (ret == -1)
     {
         return -1;
     }
