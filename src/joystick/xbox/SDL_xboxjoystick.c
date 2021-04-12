@@ -418,6 +418,8 @@ static void SDL_XBOX_JoystickUpdate(SDL_Joystick *joystick) {
     {
         xboxjoy_rumble(joystick->hwdata->hdev, 0, 0);
         joystick->hwdata->rumble_expiry = 0;
+        joystick->hwdata->current_rumble[0] = 0;
+        joystick->hwdata->current_rumble[1] = 0;
     }
 
     uint8_t button_data[MAX_PACKET_SIZE];
