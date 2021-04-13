@@ -25,7 +25,7 @@
 
 #include "../../SDL_internal.h"
 
-#if SDL_JOYSTICK_XBOX
+#if SDL_JOYSTICK_XBOX || 1
 
 #include "SDL_joystick.h"
 #include "SDL_events.h"
@@ -87,17 +87,47 @@ typedef struct joystick_hwdata
     Uint32 rumble_expiry;
 } joystick_hwdata, *pjoystick_hwdata;
 
+//Store a local cached hdev list from the USB backend to prevent certain race conditions
+HID_DEV_T *_hdev[MAX_JOYSTICKS];
+Uint32 _hdev_remove_list[MAX_JOYSTICKS];
+Uint32 _hdev_add_list[MAX_JOYSTICKS];
+Uint32 _hdev_pad_cnt = 0;
+
 static Sint32 parse_input_data(HID_DEV_T *hdev, PXINPUT_GAMEPAD controller, Uint8 *rdata);
 
 //Create SDL events for connection/disconnection. These events can then be handled in the user application
 static void connection_callback(HID_DEV_T *hdev, int status) {
     JOY_DBGMSG("connection_callback: uid %i connected \n", hdev->uid);
-    SDL_PrivateJoystickAdded(hdev->uid);
+
+    for (Sint32 i = 0; i < MAX_JOYSTICKS; i++)
+    {
+        if (_hdev_add_list[i] == hdev->uid)
+        {
+            break;
+        }
+        else if (_hdev_add_list[i] == 0)
+        {
+            _hdev_add_list[i] = hdev->uid;
+            break;
+        }
+    }
 }
 
 static void disconnect_callback(HID_DEV_T *hdev, int status) {
     JOY_DBGMSG("disconnect_callback uid %i disconnected\n", hdev->uid);
-    SDL_PrivateJoystickRemoved(hdev->uid);
+
+    for (Sint32 i = 0; i < MAX_JOYSTICKS; i++)
+    {
+        if (_hdev_remove_list[i] == hdev->uid)
+        {
+            break;
+        }
+        else if (_hdev_remove_list[i] == 0)
+        {
+            _hdev_remove_list[i] = hdev->uid;
+            break;
+        }
+    }
 }
 
 static void int_read_callback(HID_DEV_T *hdev, Uint16 ep_addr, Sint32 status, Uint8 *rdata, Uint32 data_len) {
@@ -138,6 +168,10 @@ static Sint32 rumble(HID_DEV_T *hdev, Uint16 low_frequency_rumble, Uint16 high_f
     static const Uint8 xbox360_wired[] = {0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
     static const Uint8 xbox_og[] = {0x00, 0x06, 0x00, 0x00, 0x00, 0x00};
     static const Uint8 xbox_one[] = {0x09, 0x00, 0x00, 0x09, 0x00, 0x0f, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x00, 0xEB};
+
+    //hdev has been disconnected from backend.
+    if (hdev->uid == 0)
+        return 0;
 
     Uint8 writeBuf[MAX_PACKET_SIZE];
     Sint32 ret, len;
@@ -184,23 +218,50 @@ static Sint32 rumble(HID_DEV_T *hdev, Uint16 low_frequency_rumble, Uint16 high_f
 }
 
 static HID_DEV_T *hdev_from_device_index(Sint32 device_index) {
-    HID_DEV_T *hdev = usbh_hid_get_device_list();
+    if (device_index >= MAX_JOYSTICKS)
+        return NULL;
+    if (_hdev[device_index]->uid == 0)
+        return NULL;
+    return _hdev[device_index];
+}
 
-    Sint32 i = 0;
-    //Scan the hdev linked list and finds the nth hdev that is a gamepad.
-    while (hdev != NULL && i <= device_index)
+static void sync_with_backend()
+{
+    //Re-sync local cached list with backend
+    usbh_pooling_hubs();
+    HID_DEV_T *hdev = usbh_hid_get_device_list();
+    Sint32 j = 0;
+    SDL_memset(_hdev, 0x00, sizeof(HID_DEV_T *) * MAX_JOYSTICKS);
+    while (hdev != NULL && j < MAX_JOYSTICKS)
     {
         if (hdev->type == XBOXOG_CONTROLLER || hdev->type == XBOXONE ||
             hdev->type == XBOX360_WIRED || hdev->type == XBOX360_WIRELESS)
         {
-            if (i == device_index)
-                return hdev;
-            i++;
+            _hdev[j] = hdev;
+            hdev = hdev->next;
+            j++;
         }
-        hdev = hdev->next;
     }
-    assert(0);
-    return hdev;
+    _hdev_pad_cnt = j;
+
+    //Handle queued device hotplug events
+    for (Sint32 i = 0; i < MAX_JOYSTICKS; i++)
+    {
+        if (_hdev_remove_list[i])
+        {
+            debugPrint("Removed %d\n", _hdev_remove_list[i]);
+            SDL_PrivateJoystickRemoved(_hdev_remove_list[i]);
+        }
+
+        if (_hdev_add_list[i])
+        {
+            debugPrint("Added %d\n", _hdev_add_list[i]);
+            SDL_PrivateJoystickAdded(_hdev_add_list[i]);
+        }
+
+        _hdev_remove_list[i] = 0;
+        _hdev_add_list[i] = 0;
+    }
 }
 
 static SDL_bool core_has_init = SDL_FALSE;
@@ -211,6 +272,10 @@ static Sint32 SDL_XBOX_JoystickInit(void) {
         usbh_hid_init();
         core_has_init = SDL_TRUE;
     }
+
+    SDL_memset(_hdev, 0x00, sizeof(HID_DEV_T *) * MAX_JOYSTICKS);
+    SDL_memset(_hdev_add_list, 0x00, sizeof(_hdev_add_list));
+    SDL_memset(_hdev_remove_list, 0x00, sizeof(_hdev_remove_list));
     usbh_install_hid_conn_callback(connection_callback, disconnect_callback);
 
 #ifndef SDL_DISABLE_JOYSTICK_INIT_DELAY
@@ -222,28 +287,20 @@ static Sint32 SDL_XBOX_JoystickInit(void) {
         usbh_pooling_hubs();
         SDL_Delay(1);
     }
+    sync_with_backend();
 #endif
     return 0;
 }
 
 static Sint32 SDL_XBOX_JoystickGetCount() {
-    Sint32 pad_cnt = 0;
-    HID_DEV_T *hdev = usbh_hid_get_device_list();
-    while (hdev != NULL)
-    {
-        if (hdev->type == XBOXOG_CONTROLLER || hdev->type == XBOXONE ||
-            hdev->type == XBOX360_WIRED || hdev->type == XBOX360_WIRELESS)
-        {
-            pad_cnt++;
-        }
-        hdev = hdev->next;
-    }
+    Sint32 pad_cnt = _hdev_pad_cnt;
     JOY_DBGMSG("SDL_XBOX_JoystickGetCount: Found %i pads\n", pad_cnt);
     return pad_cnt;
 }
 
 static void SDL_XBOX_JoystickDetect() {
-    usbh_pooling_hubs();
+    sync_with_backend();
+    //JOY_DBGMSG("SDL_XBOX_JoystickDetect\n");
 }
 
 static const char* SDL_XBOX_JoystickGetDeviceName(Sint32 device_index) {
@@ -359,8 +416,6 @@ static Sint32 SDL_XBOX_JoystickOpen(SDL_Joystick *joystick, Sint32 device_index)
     }
 
     JOY_DBGMSG("JoystickOpened:\n");
-    JOY_DBGMSG("joystick device_index: %i\n", device_index);
-    JOY_DBGMSG("joystick player_index: %i\n", joystick->player_index);
     JOY_DBGMSG("joystick uid: %i\n", hdev->uid);
     JOY_DBGMSG("joystick name: %s\n", SDL_XBOX_JoystickGetDeviceName(device_index));
 
@@ -401,6 +456,8 @@ static void SDL_XBOX_JoystickUpdate(SDL_Joystick *joystick) {
     Sint16 wButtons, axis, this_joy;
     Sint32 hat = SDL_HAT_CENTERED;
     XINPUT_GAMEPAD xpad;
+
+    //JOY_DBGMSG("SDL_XBOX_JoystickUpdate\n");
 
     if (joystick == NULL || joystick->hwdata == NULL || joystick->hwdata->hdev == NULL)
     {
