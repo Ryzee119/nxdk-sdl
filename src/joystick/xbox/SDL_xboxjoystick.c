@@ -87,24 +87,20 @@ typedef struct joystick_hwdata
     Uint32 rumble_expiry;
 } joystick_hwdata, *pjoystick_hwdata;
 
-static Sint32 xboxjoy_parse_input_data(HID_DEV_T *hdev, PXINPUT_GAMEPAD controller, Uint8 *rdata);
+static Sint32 parse_input_data(HID_DEV_T *hdev, PXINPUT_GAMEPAD controller, Uint8 *rdata);
 
 //Create SDL events for connection/disconnection. These events can then be handled in the user application
-static void xboxjoy_connection_callback(HID_DEV_T *hdev, int status) {
-    JOY_DBGMSG("xboxjoy_connection_callback: uid %i connected \n", hdev->uid);
+static void connection_callback(HID_DEV_T *hdev, int status) {
+    JOY_DBGMSG("connection_callback: uid %i connected \n", hdev->uid);
     SDL_PrivateJoystickAdded(hdev->uid);
 }
 
-static void xboxjoy_disconnect_callback(HID_DEV_T *hdev, int status) {
-    JOY_DBGMSG("xboxjoy_disconnect_callback uid %i disconnected\n", hdev->uid);
+static void disconnect_callback(HID_DEV_T *hdev, int status) {
+    JOY_DBGMSG("disconnect_callback uid %i disconnected\n", hdev->uid);
     SDL_PrivateJoystickRemoved(hdev->uid);
 }
 
-static void xboxjoy_int_write_callback(UTR_T *utr) {
-    JOY_DBGMSG("usbh_transfer done\n");
-}
-
-static void xboxjoy_int_read_callback(HID_DEV_T *hdev, Uint16 ep_addr, Sint32 status, Uint8 *rdata, Uint32 data_len) {
+static void int_read_callback(HID_DEV_T *hdev, Uint16 ep_addr, Sint32 status, Uint8 *rdata, Uint32 data_len) {
     if (status < 0 || hdev == NULL || hdev->user_data == NULL)
         return;
 
@@ -135,9 +131,7 @@ static void xboxjoy_int_read_callback(HID_DEV_T *hdev, Uint16 ep_addr, Sint32 st
     SDL_memcpy(joy->hwdata->raw_data, rdata, data_len);
 }
 
-static Sint32 xboxjoy_rumble(HID_DEV_T *hdev,
-                             Uint16 low_frequency_rumble,
-                             Uint16 high_frequency_rumble) {
+static Sint32 rumble(HID_DEV_T *hdev, Uint16 low_frequency_rumble, Uint16 high_frequency_rumble) {
 
     //Rumble commands for known controllers
     static const Uint8 xbox360_wireless[] = {0x00, 0x01, 0x0F, 0xC0, 0x00, 0x00, 0x00, 0x00};
@@ -179,7 +173,7 @@ static Sint32 xboxjoy_rumble(HID_DEV_T *hdev,
         return -1;
     }
 
-    ret = usbh_hid_int_write(hdev, 0, writeBuf, len, xboxjoy_int_write_callback);
+    ret = usbh_hid_int_write(hdev, 0, writeBuf, len, NULL);
 
     if (ret != HID_RET_OK)
     {
@@ -217,7 +211,7 @@ static Sint32 SDL_XBOX_JoystickInit(void) {
         usbh_hid_init();
         core_has_init = SDL_TRUE;
     }
-    usbh_install_hid_conn_callback(xboxjoy_connection_callback, xboxjoy_disconnect_callback);
+    usbh_install_hid_conn_callback(connection_callback, disconnect_callback);
 
 #ifndef SDL_DISABLE_JOYSTICK_INIT_DELAY
     //Ensure all connected devices have completed enumeration and are running
@@ -293,7 +287,7 @@ static Sint32 SDL_XBOX_JoystickGetDevicePlayerIndex(Sint32 device_index) {
     Sint32 player_index = device_index;
     JOY_DBGMSG("SDL_XBOX_JoystickGetDevicePlayerIndex: %i\n", player_index);
 
-    return device_index;
+    return player_index;
 }
 
 static SDL_JoystickGUID SDL_XBOX_JoystickGetDeviceGUID(Sint32 device_index) {
@@ -371,7 +365,7 @@ static Sint32 SDL_XBOX_JoystickOpen(SDL_Joystick *joystick, Sint32 device_index)
     JOY_DBGMSG("joystick name: %s\n", SDL_XBOX_JoystickGetDeviceName(device_index));
 
     //Start reading interrupt pipe
-    usbh_hid_start_int_read(hdev, 0, xboxjoy_int_read_callback);
+    usbh_hid_start_int_read(hdev, 0, int_read_callback);
 
     return 0;
 }
@@ -390,7 +384,7 @@ static Sint32 SDL_XBOX_JoystickRumble(SDL_Joystick *joystick,
         return 0;
     }
 
-    Sint32 ret = xboxjoy_rumble(joystick->hwdata->hdev, low_frequency_rumble, high_frequency_rumble);
+    Sint32 ret = rumble(joystick->hwdata->hdev, low_frequency_rumble, high_frequency_rumble);
 
     if (ret == -1)
     {
@@ -416,7 +410,7 @@ static void SDL_XBOX_JoystickUpdate(SDL_Joystick *joystick) {
     //Check if the rumble timer has expired.
     if (joystick->hwdata->rumble_expiry && SDL_GetTicks() > joystick->hwdata->rumble_expiry)
     {
-        xboxjoy_rumble(joystick->hwdata->hdev, 0, 0);
+        rumble(joystick->hwdata->hdev, 0, 0);
         joystick->hwdata->rumble_expiry = 0;
         joystick->hwdata->current_rumble[0] = 0;
         joystick->hwdata->current_rumble[1] = 0;
@@ -424,7 +418,7 @@ static void SDL_XBOX_JoystickUpdate(SDL_Joystick *joystick) {
 
     uint8_t button_data[MAX_PACKET_SIZE];
     SDL_memcpy(button_data, joystick->hwdata->raw_data, MAX_PACKET_SIZE);
-    if (xboxjoy_parse_input_data(joystick->hwdata->hdev, &xpad, button_data))
+    if (parse_input_data(joystick->hwdata->hdev, &xpad, button_data))
     {
         wButtons = xpad.wButtons;
 
@@ -491,7 +485,7 @@ static void SDL_XBOX_JoystickClose(SDL_Joystick *joystick) {
     if (joystick->hwdata == NULL)
         return;
 
-    xboxjoy_rumble(joystick->hwdata->hdev, 0, 0);
+    rumble(joystick->hwdata->hdev, 0, 0);
 
     HID_DEV_T *hdev = joystick->hwdata->hdev;
     hdev->user_data = NULL;
@@ -529,7 +523,7 @@ SDL_JoystickDriver SDL_XBOX_JoystickDriver = {
     SDL_XBOX_JoystickQuit
 };
 
-static Sint32 xboxjoy_parse_input_data(HID_DEV_T *hdev, PXINPUT_GAMEPAD controller, Uint8 *rdata) {
+static Sint32 parse_input_data(HID_DEV_T *hdev, PXINPUT_GAMEPAD controller, Uint8 *rdata) {
     Uint16 wButtons;
     controller->wButtons = 0;
 
