@@ -115,16 +115,15 @@ static void int_read_callback(UTR_T *utr) {
     if (data_len > MAX_PACKET_SIZE)
         data_len = MAX_PACKET_SIZE;
 
-    SDL_memcpy(joy->hwdata->raw_data, utr->buff, data_len);
+    if (joy->hwdata != NULL)
+    {
+        SDL_memcpy(joy->hwdata->raw_data, utr->buff, data_len);
 
-    //Queue the next read
-    usbh_xid_read(xid_dev, 0, int_read_callback);
-}
-
-static Sint32 rumble(xid_dev_t *xid_dev, Uint16 low_frequency_rumble, Uint16 high_frequency_rumble) {
-
-    Sint32 ret = usbh_xid_rumble(xid_dev, low_frequency_rumble, high_frequency_rumble);
-    return ret == USBH_OK ? 0 : -1;
+        //Re-queue the USB transfer
+        utr->xfer_len = 0;
+        utr->bIsTransferDone = 0;
+        usbh_int_xfer(utr);
+    }
 }
 
 static xid_dev_t *xid_from_device_index(Sint32 device_index) {
@@ -304,6 +303,7 @@ static Sint32 SDL_XBOX_JoystickOpen(SDL_Joystick *joystick, Sint32 device_index)
         break;
     default:
         SDL_free(joystick->hwdata);
+        joystick->hwdata = NULL;
         return -1;
     }
 
@@ -328,13 +328,12 @@ static Sint32 SDL_XBOX_JoystickRumble(SDL_Joystick *joystick,
     if (joystick->hwdata->current_rumble[0] == low_frequency_rumble &&
         joystick->hwdata->current_rumble[1] == high_frequency_rumble)
     {
-        //Reset the expiry timer and leave
+        //Rumble values not changed, reset the expiry timer and leave.
         joystick->hwdata->rumble_expiry = SDL_GetTicks() + duration_ms;
         return 0;
     }
 
-    Sint32 ret = usbh_xid_rumble(joystick->hwdata->xid_dev, low_frequency_rumble, high_frequency_rumble);
-    if (ret != USBH_OK)
+    if (usbh_xid_rumble(joystick->hwdata->xid_dev, low_frequency_rumble, high_frequency_rumble) != USBH_OK)
     {
         return -1;
     }
@@ -358,7 +357,7 @@ static void SDL_XBOX_JoystickUpdate(SDL_Joystick *joystick) {
     //Check if the rumble timer has expired.
     if (joystick->hwdata->rumble_expiry && SDL_GetTicks() > joystick->hwdata->rumble_expiry)
     {
-        rumble(joystick->hwdata->xid_dev, 0, 0);
+        usbh_xid_rumble(joystick->hwdata->xid_dev, 0, 0);
         joystick->hwdata->rumble_expiry = 0;
         joystick->hwdata->current_rumble[0] = 0;
         joystick->hwdata->current_rumble[1] = 0;
@@ -367,6 +366,7 @@ static void SDL_XBOX_JoystickUpdate(SDL_Joystick *joystick) {
     Uint8 button_data[MAX_PACKET_SIZE];
     SDL_memcpy(button_data, joystick->hwdata->raw_data, MAX_PACKET_SIZE);
 
+    //FIXME. Steel Battalion and XREMOTE should be parsed differently.
     if (parse_input_data(joystick->hwdata->xid_dev, &xpad, button_data))
     {
         wButtons = xpad.wButtons;
@@ -434,7 +434,7 @@ static void SDL_XBOX_JoystickClose(SDL_Joystick *joystick) {
     if (joystick->hwdata == NULL)
         return;
 
-    rumble(joystick->hwdata->xid_dev, 0, 0);
+    usbh_xid_rumble(joystick->hwdata->xid_dev, 0, 0);
 
     xid_dev_t *xid_dev = joystick->hwdata->xid_dev;
     xid_dev->user_data = NULL;
